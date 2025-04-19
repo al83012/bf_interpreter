@@ -7,11 +7,11 @@ const ChannelError = error{
     DataCorruption,
 };
 
-fn Channel(comptime T: type) type {
-    return BufferedChannel(T, 0);
-}
+// pub fn Channel(comptime T: type) type {
+//     return BufferedChannel(T, 0);
+// }
 
-fn BufferedChannel(comptime T: type, comptime bufSize: u8) type {
+pub fn BufferedChannel(comptime T: type, comptime bufSize: usize) type {
     return struct {
         const Self = @This();
         const bufType = [bufSize]?T;
@@ -46,7 +46,7 @@ fn BufferedChannel(comptime T: type, comptime bufSize: u8) type {
             }
         };
 
-        fn init(alloc: std.mem.Allocator) Self {
+        pub fn init(alloc: std.mem.Allocator) Self {
             return Self{
                 .alloc = alloc,
                 .recvQ = std.ArrayList(*Receiver).init(alloc),
@@ -54,7 +54,7 @@ fn BufferedChannel(comptime T: type, comptime bufSize: u8) type {
             };
         }
 
-        fn deinit(self: *Self) void {
+        pub fn deinit(self: *Self) void {
             self.recvQ.deinit();
             self.sendQ.deinit();
         }
@@ -88,7 +88,7 @@ fn BufferedChannel(comptime T: type, comptime bufSize: u8) type {
             return i;
         }
 
-        fn send(self: *Self, data: T) ChannelError!void {
+        pub fn send(self: *Self, data: T) ChannelError!void {
             if (self.closed) return ChannelError.Closed;
 
             self.mut.lock();
@@ -128,7 +128,7 @@ fn BufferedChannel(comptime T: type, comptime bufSize: u8) type {
             return;
         }
 
-        fn recv(self: *Self) ChannelError!T {
+        pub fn recv(self: *Self) ChannelError!T {
             if (self.closed) return ChannelError.Closed;
             self.mut.lock();
             errdefer self.mut.unlock();
