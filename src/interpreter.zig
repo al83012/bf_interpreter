@@ -2,6 +2,7 @@ pub const std = @import("std");
 pub const BoundedArray = std.BoundedArray;
 pub const ArrayList = std.ArrayList;
 pub const Allocator = std.mem.Allocator;
+pub const Channel = @import("channel.zig").Channel;
 
 pub const SizeConstraint = union(enum) {
     sized: usize,
@@ -9,10 +10,13 @@ pub const SizeConstraint = union(enum) {
 };
 
 pub const InterpreterConfig = struct {
-    max_callstack_size: SizeConstraint,
     max_program_buffer_size: SizeConstraint,
-    max_program_size: SizeConstraint,
     reader_buf_size: usize,
+};
+
+pub const InstructionExecutionError = error{
+    UnexpectedJumpBack,
+    MovedPointerOutOfRange,
 };
 
 pub const ReducedInstruction = union(enum) {
@@ -20,9 +24,13 @@ pub const ReducedInstruction = union(enum) {
     MovLeft: usize,
     JumpPoint,
     JumpBackTo: usize,
-    Incr: usize,
-    Decr: usize,
+    Incr: u8,
+    Decr: u8,
     Zero,
+    EOP,
+    ReadIo,
+    WriteIo,
+
     const Self = @This();
 
     fn format(
@@ -74,7 +82,7 @@ pub fn CharReader(comptime buf_size: usize) type {
         peeked: ?u8 = null,
         const Self = @This();
 
-        pub fn init(file: std.fs.File) Self {
+        pub fn new(file: std.fs.File) Self {
             return Self{
                 .reader = std.io.bufferedReader(file.reader()),
                 .peeked = null,
@@ -119,93 +127,27 @@ pub fn CharReader(comptime buf_size: usize) type {
     };
 }
 
-pub fn Interpreter(comptime config: InterpreterConfig) type {
-    const call_stack_ty = switch (config.max_callstack_size) {
-        .sized => |size| BoundedArray(usize, size),
-        .dynamic => |_| ArrayList(usize),
-    };
+pub const InstructionChannel = Channel(ReducedInstruction);
 
-    const buf_ty = switch (config.max_program_buffer_size) {
-        .sized => |size| BoundedArray(u8, size),
-        .dynamic => |_| ArrayList(u8),
-    };
-
-    const instr_ty = switch (config.max_program_size) {
-        .sized => |size| BoundedArray(ReducedInstruction, size),
-        .dynamic => |_| ArrayList(ReducedInstruction),
-    };
-
+pub fn InstructionWriter(comptime file_reader_buf_size: usize) type {
     return struct {
-        call_stack: call_stack_ty,
-        buffer: buf_ty,
-        reduced_instructions: instr_ty,
-        instruction_pos: usize = 0,
-        char_reader: SelfCharReader,
+        channel: *InstructionChannel,
+        char_reader: CharReader(file_reader_buf_size),
 
         const Self = @This();
-        const SelfCharReader = CharReader(config.reader_buf_size);
 
-        pub fn init() !Self {
+        pub fn init(file: std.fs.File, channel: *InstructionChannel) Self {
             return .{
-                .call_stack = switch (config.max_callstack_size) {
-                    .sized => |_| try call_stack_ty.init(0),
-                    .dynamic => |alloc| call_stack_ty.init(alloc),
-                },
-                .buffer = switch (config.max_program_buffer_size) {
-                    .sized => |_| try buf_ty.init(0),
-                    .dynamic => |alloc| buf_ty.init(alloc),
-                },
-                .reduced_instructions = switch (config.max_program_size) {
-                    .sized => |_| try instr_ty.init(0),
-                    .dynamic => |alloc| instr_ty.init(alloc),
-                },
-                .char_reader = undefined,
-                .instruction_pos = 0,
+                .channel = channel,
+                .char_reader = CharReader(file_reader_buf_size).init(file),
             };
         }
         pub fn deinit(self: Self) void {
-            self.call_stack.deinit();
-            self.buffer.deinit();
-            self.reduced_instructions.deinit();
+            self.char_reader.deinit();
         }
 
-        pub fn run(self: *Self, file_name: []const u8) !void {
-            var file = try std.fs.cwd().openFile(file_name, .{});
-            defer file.close();
-
-            self.char_reader = SelfCharReader.init(file);
-
-            std.log.warn("\n", .{});
-            while (try self.nextInstruction()) |instr| {
-                std.log.warn("Next: {}", .{instr});
-            }
-        }
-
-        fn nextInstruction(self: *Self) !?ReducedInstruction {
-            const next_instr: ?ReducedInstruction = blk: {
-                const len = switch (config.max_program_size) {
-                    .sized => |_| self.reduced_instructions.len,
-                    .dynamic => |_| self.reduced_instructions.items.len,
-                };
-                if (self.instruction_pos < len) {
-                    break :blk switch (config.max_program_size) {
-                        .sized => |_| self.reduced_instructions.get(self.instruction_pos),
-                        .dynamic => |_| self.reduced_instructions.items[self.instruction_pos],
-                    };
-                } else {
-                    const next = try self.genNextInstruction();
-                    if (next) |n| {
-                        try self.reduced_instructions.append(n);
-                    }
-                    break :blk next;
-                }
-            };
-            self.instruction_pos += 1;
-            return next_instr;
-        }
-
-        fn genNextInstruction(self: *Self) !?ReducedInstruction {
-            const next_char = try self.char_reader.readChar() orelse return null;
+        fn genNextInstruction(self: *Self) !ReducedInstruction {
+            const next_char = try self.char_reader.readChar() orelse return .EOF;
             switch (next_char) {
                 '<' => {
                     var count: usize = 1;
@@ -234,10 +176,11 @@ pub fn Interpreter(comptime config: InterpreterConfig) type {
                 },
 
                 '+' => {
-                    var count: usize = 1;
+                    var count: u8 = 1;
                     while (try self.char_reader.peekChar()) |peek| {
                         if (peek == '+') {
-                            count += 1;
+                            // Keeping it as a u8 is fine since it will wrap in the program code anyways
+                            count +%= 1;
                             self.char_reader.markPeekRead();
                         } else {
                             break;
@@ -247,10 +190,10 @@ pub fn Interpreter(comptime config: InterpreterConfig) type {
                 },
 
                 '-' => {
-                    var count: usize = 1;
+                    var count: u8 = 1;
                     while (try self.char_reader.peekChar()) |peek| {
                         if (peek == '-') {
-                            count += 1;
+                            count +%= 1;
                             self.char_reader.markPeekRead();
                         } else {
                             break;
@@ -260,6 +203,116 @@ pub fn Interpreter(comptime config: InterpreterConfig) type {
                 },
                 else => @panic("Not yet supported"),
             }
+        }
+
+        fn sendAllInstructions(self: *Self) !void {
+            while (true) {
+                const next_instruction = try self.genNextInstruction();
+                try self.channel.send(next_instruction);
+                if (next_instruction == .EOP) {
+                    break;
+                }
+            }
+        }
+    };
+}
+
+pub fn InstructionReader(buffer_size: SizeConstraint) type {
+    return struct {
+        channel: *InstructionChannel,
+        local_instructions: ArrayList(ReducedInstruction),
+        instruction_pos: usize,
+        read_from_channel: bool,
+        pointer_pos: usize,
+        loop_stack: ArrayList(usize),
+        buffer: ArrayList(u8),
+
+        const Self = @This();
+
+        pub fn init(channel: *InstructionChannel, alloc: Allocator) Self {
+            const local_instructions = ArrayList(ReducedInstruction).init(alloc);
+            const instruction_pos = 0;
+            const read_from_channel = true;
+            const pointer_pos = 0;
+            const loop_stack = ArrayList(usize).init(alloc);
+            const buffer = comptime switch (buffer_size) {
+                .dynamic => |a| ArrayList(usize).init(a),
+                .sized => |s| blk: {
+                    const buffer = [_]u8{0} ** s;
+                    break :blk ArrayList(usize).init(std.heap.FixedBufferAllocator.init(buffer));
+                },
+            };
+            return .{
+                .channel = channel,
+                .local_instructions = local_instructions,
+                .instruction_pos = instruction_pos,
+                .read_from_channel = read_from_channel,
+                .pointer_pos = pointer_pos,
+                .loop_stack = loop_stack,
+                .buffer = buffer,
+            };
+        }
+
+        pub fn deinit(self: Self) void {
+            self.local_instructions.deinit();
+            self.loop_stack.deinit();
+            self.buffer.deinit();
+        }
+
+        fn processInstruction(self: *Self, instruction: ReducedInstruction) !void {
+            switch (instruction) {
+                .Incr => |x| self.selectedValue().* -%= x,
+                .Decr => |x| self.selectedValue().* +%= x,
+                .Zero => self.selectedValue().* = 0,
+                .JumpPoint => try self.loop_stack.append(self.instruction_pos),
+                .JumpBackTo => {
+                    const jump_point = self.loop_stack.popOrNull() orelse return InstructionExecutionError.UnexpectedJumpBack;
+                    self.instruction_pos = jump_point;
+                },
+                .MovLeft => |x| {
+                    if (self.pointer_pos >= x) {
+                        self.pointer_pos -= x;
+                    }
+                },
+                .MovRight => |x| {
+                    self.pointer_pos += x;
+                    if (self.pointer_pos >= self.buffer.items.len) {
+                        const extend = self.pointer_pos - self.buffer.items.len + 1;
+                        self.buffer.appendNTimes(0, extend);
+                    }
+                },
+                .EOP => {},
+
+                else => @panic("Not yet implemented"),
+            }
+        }
+
+        fn selectedValue(self: *Self) *u8 {
+            return *self.buffer.items[self.pointer_pos];
+        }
+
+        fn processAllInstructions(self: *Self) !void {
+            while (true) {
+                const next_instruction = blk: {
+                    if (self.read_from_channel) {
+                        break :blk try self.readNextFromChannel();
+                    } else {
+                        break :blk try self.local_instructions.items[self.instruction_pos];
+                    }
+                };
+                if (next_instruction == .EOP) {
+                    return;
+                }
+                self.processInstruction(next_instruction);
+                self.instruction_pos += 1;
+                self.read_from_channel = self.instruction_pos >= self.local_instructions.items.len;
+            }
+        }
+
+        fn readNextFromChannel(self: *Self) !ReducedInstruction {
+            const next = try self.channel.recv();
+            try self.local_instructions.append(next);
+            return next;
         }
     };
 }
