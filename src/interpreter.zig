@@ -4,7 +4,9 @@ pub const ArrayList = std.ArrayList;
 pub const Allocator = std.mem.Allocator;
 // pub const Channel = @import("channel.zig").Channel;
 pub const BufferedChannel = @import("channel.zig").BufferedChannel;
-
+pub const Writer = std.io.Writer;
+pub const Reader = std.io.Reader;
+pub const HashMap = std.AutoHashMap;
 pub const SizeConstraint = union(enum) {
     sized: usize,
     dynamic: Allocator,
@@ -18,6 +20,14 @@ pub const InterpreterConfig = struct {
 pub const InstructionExecutionError = error{
     UnexpectedJumpBack,
     MovedPointerOutOfRange,
+    UnmatchedOpenBracket,
+    FurthestMatchedInstructionCorrupted,
+};
+
+pub const InstructionParserError = error{
+    UnmatchedOpenBracket,
+    UnmatchedClosedBracket,
+    UnsupportedChar,
 };
 
 pub const ReducedInstruction = union(enum) {
@@ -180,7 +190,8 @@ pub fn InstructionWriter(comptime file_reader_buf_size: usize) type {
         channel: *InstructionChannel,
         // The peek buffer size is 2 as the longest strictly structured instruction would be the zero instruction with 3 characters
         // --> Read, Peek1, Peek2
-        char_reader: Reader,
+        char_reader: Self.Reader,
+        indent_counter: usize,
 
         const Self = @This();
         const Reader = PeekableFileReader(file_reader_buf_size, 2);
@@ -188,12 +199,12 @@ pub fn InstructionWriter(comptime file_reader_buf_size: usize) type {
         pub fn init(file: std.fs.File, channel: *InstructionChannel) Self {
             return .{
                 .channel = channel,
-                .char_reader = Reader.init(file),
+                .char_reader = Self.Reader.init(file),
             };
         }
 
-        fn genNextInstruction(self: *Self) !ReducedInstruction {
-            const next_char = try self.char_reader.read() orelse return .EOP;
+        fn genNextInstruction(self: *Self) InstructionParserError!ReducedInstruction {
+            const next_char = try self.char_reader.read() orelse if (self.indent_counter == 0) return .EOP else return InstructionParserError.UnmatchedOpenBracket;
             switch (next_char) {
                 '<' => {
                     var count: usize = 1;
@@ -253,10 +264,16 @@ pub fn InstructionWriter(comptime file_reader_buf_size: usize) type {
                         self.char_reader.confirmPeeks();
                         return ReducedInstruction.Zero;
                     } else {
+                        self.indent_counter += 1;
                         return ReducedInstruction.JumpPoint;
                     }
                 },
                 ']' => {
+                    if (self.indent_counter > 0) {
+                        self.indent_counter -= 1;
+                    } else {
+                        return InstructionParserError.UnmatchedClosedBracket;
+                    }
                     return ReducedInstruction.JumpBackTo;
                 },
                 '.' => {
@@ -265,7 +282,7 @@ pub fn InstructionWriter(comptime file_reader_buf_size: usize) type {
                 ',' => {
                     return ReducedInstruction.WriteIo;
                 },
-                else => @panic("Not yet supported"),
+                else => return InstructionParserError.UnsupportedChar,
             }
         }
 
@@ -288,17 +305,20 @@ pub fn InstructionReader(buffer_size: SizeConstraint) type {
         instruction_pos: usize,
         read_from_channel: bool,
         pointer_pos: usize,
-        loop_stack: ArrayList(usize),
+        jump_points: HashMap(usize, usize), // Jump from bracket pos to bracket pos
+        unmatched_open: ArrayList(usize),
         buffer: ArrayList(u8),
+        out: Writer,
+        in: Reader,
+        furthest_matched_instruction: usize,
 
         const Self = @This();
 
-        pub fn init(channel: *InstructionChannel, instruction_alloc: Allocator, stack_alloc: Allocator) Self {
+        pub fn init(channel: *InstructionChannel, instruction_alloc: Allocator, jump_alloc: Allocator) Self {
             const local_instructions = ArrayList(ReducedInstruction).init(instruction_alloc);
             const instruction_pos = 0;
             const read_from_channel = true;
             const pointer_pos = 0;
-            const loop_stack = ArrayList(usize).init(stack_alloc);
             const buffer = comptime switch (buffer_size) {
                 .dynamic => |a| ArrayList(usize).init(a),
                 .sized => |s| blk: {
@@ -306,15 +326,33 @@ pub fn InstructionReader(buffer_size: SizeConstraint) type {
                     break :blk ArrayList(usize).init(std.heap.FixedBufferAllocator.init(buffer));
                 },
             };
+            const std_out = std.io.getStdOut().writer();
+            const std_in = std.io.getStdIn().reader();
+
+            const jump_points = HashMap(usize, usize).init(jump_alloc);
+            const unmatched_open = ArrayList(usize).init(jump_alloc);
+
             return .{
                 .channel = channel,
                 .local_instructions = local_instructions,
                 .instruction_pos = instruction_pos,
                 .read_from_channel = read_from_channel,
                 .pointer_pos = pointer_pos,
-                .loop_stack = loop_stack,
                 .buffer = buffer,
+                .jump_points = jump_points,
+                .unmatched_open = unmatched_open,
+                .out = std_out,
+                .in = std_in,
+                .furthest_resolved_instruction = 0,
             };
+        }
+
+        pub fn setOutWriter(self: *Self, writer: Writer) void {
+            self.out = writer;
+        }
+
+        pub fn setInReader(self: *Self, reader: Reader) void {
+            self.in = reader;
         }
 
         pub fn deinit(self: Self) void {
@@ -323,16 +361,59 @@ pub fn InstructionReader(buffer_size: SizeConstraint) type {
             self.buffer.deinit();
         }
 
+        pub fn readNext(self: *Self) !ReducedInstruction {
+            if (self.read_from_channel) {
+                return try self.readNextFromChannel();
+            } else {
+                return try self.local_instructions.items[self.instruction_pos];
+            }
+        }
+
+        fn searchClosingBracket(self: *Self) !void {
+            var indent_counter = 1;
+            self.read_from_channel = self.instruction_pos >= self.local_instructions.items.len;
+
+            while (indent_counter != 0) {
+                const next_instruction = self.readNext();
+                if (next_instruction == .EOP) {
+                    return InstructionExecutionError.UnmatchedOpenBracket;
+                }
+                switch (next_instruction) {
+                    ReducedInstruction.JumpPoint => {
+                        indent_counter += 1;
+                        self.unmatched_open.append(self.instruction_pos);
+                    },
+                    ReducedInstruction.JumpBackTo => {
+                        indent_counter -= 1;
+                        const matching_open = self.unmatched_open.pop();
+                        self.jump_points.put(matching_open, self.instruction_pos);
+                        self.jump_points.put(self.instruction_pos, matching_open);
+                        self.furthest_matched_instruction = self.instruction_pos;
+                    },
+                }
+                self.instruction_pos += 1;
+            }
+        }
+
         fn processInstruction(self: *Self, instruction: ReducedInstruction) !void {
             switch (instruction) {
                 .Incr => |x| self.selectedValue().* -%= x,
                 .Decr => |x| self.selectedValue().* +%= x,
                 .Zero => self.selectedValue().* = 0,
-                .JumpPoint => try self.loop_stack.append(self.instruction_pos),
-                .JumpBackTo => {
-                    const jump_point = self.loop_stack.popOrNull() orelse return InstructionExecutionError.UnexpectedJumpBack;
-                    self.instruction_pos = jump_point;
+                .JumpPoint => {
+                    // We first need to determine whether this jumppoint has been resolved yet --> Does it have to be put on the unmatched stack?
+                    if (self.furthest_resolved_instruction < self.instruction_pos) {
+                        self.unmatched_open.append(self.instruction_pos);
+                        if (self.selectedValue.* == 0) {
+                            self.searchClosingBracket();
+                        }
+                    } else {
+                        if (self.selectedValue.* == 0) {
+                            self.instruction_pos = self.jump_points.get(self.instruction_pos) orelse return InstructionExecutionError.FurthestMatchedInstructionCorrupted;
+                        }
+                    }
                 },
+                .JumpBackTo => {},
                 .MovLeft => |x| {
                     if (self.pointer_pos >= x) {
                         self.pointer_pos -= x;
@@ -346,6 +427,7 @@ pub fn InstructionReader(buffer_size: SizeConstraint) type {
                     }
                 },
                 .EOP => {},
+                .ReadIo => {},
 
                 else => @panic("Not yet implemented"),
             }
@@ -357,13 +439,7 @@ pub fn InstructionReader(buffer_size: SizeConstraint) type {
 
         fn processAllInstructions(self: *Self) !void {
             while (true) {
-                const next_instruction = blk: {
-                    if (self.read_from_channel) {
-                        break :blk try self.readNextFromChannel();
-                    } else {
-                        break :blk try self.local_instructions.items[self.instruction_pos];
-                    }
-                };
+                const next_instruction = self.readNext();
                 if (next_instruction == .EOP) {
                     return;
                 }
@@ -446,8 +522,16 @@ pub fn PeekableFileReader(comptime buf_size: usize, comptime max_peek_len: usize
 const File = std.fs.File;
 const t_expect = std.testing.expect;
 
-test "test_InstructionGen" {
-    const file = try std.fs.cwd().openFile("bs/test-1.bs", .{});
+test "test_hello-world" {
+    const file = try std.fs.cwd().openFile("bf/test-1.bs", .{});
+    defer file.close();
+
+    var channel = InstructionChannel.init(std.testing.allocator);
+    defer channel.deinit();
+}
+
+test "test_1-InstructionGen" {
+    const file = try std.fs.cwd().openFile("bf/test-1.bs", .{});
     defer file.close();
 
     var channel = InstructionChannel.init(std.testing.allocator);
