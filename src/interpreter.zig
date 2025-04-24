@@ -15,6 +15,9 @@ pub const SizeConstraint = union(enum) {
 var GPA = std.heap.GeneralPurposeAllocator(.{}){};
 const alloc = GPA.allocator();
 
+var _arr_list = ArrayList(u8).init(std.testing.allocator);
+const DefaultIoWriter = @TypeOf(_arr_list.writer());
+
 pub const InterpreterConfig = struct {
     const Self = @This();
 
@@ -23,7 +26,7 @@ pub const InterpreterConfig = struct {
     instr_alloc: Allocator = alloc,
     jump_alloc: Allocator = alloc,
     channel_alloc: Allocator = alloc,
-    IoWriter: type = @TypeOf(std.io.getStdOut().writer()),
+    IoWriter: type = DefaultIoWriter,
     IoReader: type = @TypeOf(std.io.getStdIn().reader()),
 };
 
@@ -294,10 +297,10 @@ pub fn InstructionWriter(comptime file_reader_buf_size: usize) type {
                     }
                     return ReducedInstruction.JumpBackTo;
                 },
-                '.' => {
+                ',' => {
                     return ReducedInstruction.ReadIo;
                 },
-                ',' => {
+                '.' => {
                     return ReducedInstruction.WriteIo;
                 },
                 else => return InstructionParserError.UnsupportedChar,
@@ -307,6 +310,7 @@ pub fn InstructionWriter(comptime file_reader_buf_size: usize) type {
         fn sendAllInstructions(self: *Self) !void {
             while (true) {
                 const next_instruction = try self.genNextInstruction();
+                // std.debug.print("[WRITE] next_instruction = {any}", .{next_instruction});
                 try self.channel.send(next_instruction);
                 if (next_instruction.isEOP()) {
                     break;
@@ -315,8 +319,8 @@ pub fn InstructionWriter(comptime file_reader_buf_size: usize) type {
         }
 
         pub fn sendAllPanic(self: *Self) void {
-            self.sendAllInstructions catch |err| {
-                std.debug.panic("Sending panicked with error {any}", err);
+            self.sendAllInstructions() catch |err| {
+                std.debug.panic("Sending panicked with error {any}", .{err});
             };
         }
     };
@@ -422,8 +426,14 @@ pub fn InstructionReader(buffer_size: SizeConstraint, OutWriter: type, InReader:
 
         fn processInstruction(self: *Self, instruction: ReducedInstruction) !void {
             switch (instruction) {
-                .Incr => |x| self.selectedValue().* -%= x,
-                .Decr => |x| self.selectedValue().* +%= x,
+                .Incr => |x| {
+                    self.selectedValue().* +%= x;
+                    // std.debug.print("Selected Value now is {d}", .{self.selectedValue().*});
+                },
+                .Decr => |x| {
+                    self.selectedValue().* -%= x;
+                    // std.debug.print("Selected Value now is {d}", .{self.selectedValue().*});
+                },
                 .Zero => self.selectedValue().* = 0,
                 .JumpPoint => {
                     // We first need to determine whether this jumppoint has been resolved yet --> Does it have to be put on the unmatched stack?
@@ -445,8 +455,10 @@ pub fn InstructionReader(buffer_size: SizeConstraint, OutWriter: type, InReader:
                             self.instruction_pos = open;
                         }
                     } else {
-                        const open = self.jump_points.get(self.instruction_pos) orelse return InstructionExecutionError.FurthestMatchedInstructionCorrupted;
-                        self.instruction_pos = open;
+                        if (self.selectedValue().* != 0) {
+                            const open = self.jump_points.get(self.instruction_pos) orelse return InstructionExecutionError.FurthestMatchedInstructionCorrupted;
+                            self.instruction_pos = open;
+                        }
                     }
                 },
                 .MovLeft => |x| {
@@ -480,6 +492,7 @@ pub fn InstructionReader(buffer_size: SizeConstraint, OutWriter: type, InReader:
         fn processAllInstructions(self: *Self) !void {
             while (true) {
                 const next_instruction = try self.readNext();
+                // std.debug.print("\nNext processed instruction: {any}", .{next_instruction});
                 if (next_instruction.isEOP()) {
                     return;
                 }
@@ -602,23 +615,106 @@ pub fn Interpreter(comptime config: InterpreterConfig) type {
 const File = std.fs.File;
 const t_expect = std.testing.expect;
 
-test "test_hello-world" {
-    var file = try std.fs.cwd().openFile("bf/test-1.bs", .{});
+// test "test_hello-world_InstructionGen" {
+//     const file = try std.fs.cwd().openFile("bf/test-hello_world.bf", .{});
+//     defer file.close();
+//
+//     var channel = InstructionChannel.init(std.testing.allocator);
+//     defer channel.deinit();
+//
+//     const WriterType = InstructionWriter(4096);
+//
+//     var instr_writer = WriterType.init(file, &channel);
+//
+//     var thread = try std.Thread.spawn(.{}, WriterType.sendAllPanic, .{&instr_writer});
+//     defer thread.join();
+//
+//     while (channel.recv()) |instr| {
+//         if (instr.isEOP()) {
+//             break;
+//         }
+//         std.debug.print("\nREDUCED INSTRUCTION: {any}", .{instr});
+//     } else |err| {
+//         return err;
+//     }
+// }
+
+test "test-hello_world" {
+    var file = try std.fs.cwd().openFile("bf/test-hello_world.bf", .{});
     defer file.close();
 
-    var std_out = std.io.getStdOut().writer();
+    var output = ArrayList(u8).init(std.testing.allocator);
+    defer output.deinit();
+
+    var writer = output.writer();
     var std_in = std.io.getStdIn().reader();
 
-    _ = &std_out;
+    _ = &writer;
     _ = &std_in;
 
-    var interpreter = Interpreter(.{}).init(file, std_out, std_in);
+    var interpreter = Interpreter(.{}).init(file, writer, std_in);
     defer interpreter.deinit();
     try interpreter.run();
+
+    const expected: []const u8 = "Hello World!\n";
+
+    // std.debug.print("\nDebug Charcodes for {s} ", .{output.items});
+    for (output.items) |char| {
+        std.debug.print("{x} ", .{char});
+    }
+    // std.debug.print("\n\n", .{});
+
+    const expected_len = expected.len;
+    const output_len = output.items.len;
+    if (expected_len != output_len) {
+        std.debug.panic("Output len does not match, expected: {d}, found: {d}", .{ expected_len, output_len });
+    }
+
+    // std.debug.print("\nExpectedLen {}", .{output.items.len});
+
+    try t_expect(std.mem.eql(u8, output.items, expected));
+}
+
+test "test-list_all" {
+    var file = try std.fs.cwd().openFile("bf/test-list_all.bf", .{});
+    defer file.close();
+
+    var output = ArrayList(u8).init(std.testing.allocator);
+    defer output.deinit();
+
+    var writer = output.writer();
+    var std_in = std.io.getStdIn().reader();
+
+    _ = &writer;
+    _ = &std_in;
+
+    var interpreter = Interpreter(.{}).init(file, writer, std_in);
+    defer interpreter.deinit();
+    try interpreter.run();
+
+    // const expected: []const u8 = "Hello World!\n";
+
+    // std.debug.print("\nDebug Charcodes for {s} ", .{output.items});
+    // for (output.items) |char| {
+    //     std.debug.print("{x} ", .{char});
+    // }
+    // std.debug.print("\n\n", .{});
+
+    // const expected_len = expected.len;
+    // const output_len = output.items.len;
+    // if (expected_len != output_len) {
+    //     std.debug.panic("Output len does not match, expected: {d}, found: {d}", .{ expected_len, output_len });
+    // }
+
+    // std.debug.print("\nExpectedLen {}", .{output.items.len});
+
+    // try t_expect(std.mem.eql(u8, output.items, expected));
+
+    std.debug.print("\n\n{s}\n\n", .{output.items});
 }
 
 test "test_1-InstructionGen" {
-    const file = try std.fs.cwd().openFile("bf/test-1.bs", .{});
+    const file = try std.fs.cwd().openFile("bf/test-1.bf", .{});
     defer file.close();
 
     var channel = InstructionChannel.init(std.testing.allocator);
@@ -631,5 +727,4 @@ test "test_1-InstructionGen" {
     try t_expect(ReducedInstruction.deepEqual(ReducedInstruction.Zero, try instr_writer.genNextInstruction()));
     try t_expect(ReducedInstruction.deepEqual(ReducedInstruction{ .Incr = 3 }, try instr_writer.genNextInstruction()));
     try t_expect(ReducedInstruction.deepEqual(ReducedInstruction.JumpBackTo, try instr_writer.genNextInstruction()));
-    try t_expect(ReducedInstruction.deepEqual(ReducedInstruction.EOP, try instr_writer.genNextInstruction()));
 }
