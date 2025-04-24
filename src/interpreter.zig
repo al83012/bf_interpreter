@@ -343,7 +343,9 @@ pub fn InstructionReader(buffer_size: SizeConstraint, OutWriter: type, InReader:
         const Self = @This();
 
         pub fn init(channel: *InstructionChannel, instruction_alloc: Allocator, jump_alloc: Allocator, out_writer: OutWriter, in_reader: InReader) Self {
-            const local_instructions = ArrayList(ReducedInstruction).init(instruction_alloc);
+            var local_instructions = ArrayList(ReducedInstruction).init(instruction_alloc);
+            local_instructions.append(ReducedInstruction.Zero) catch |err| std.debug.panic("Append panic {any}", err);
+
             const instruction_pos = 0;
             const read_from_channel = true;
             const pointer_pos = 0;
