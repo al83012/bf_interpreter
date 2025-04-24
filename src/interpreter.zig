@@ -675,6 +675,9 @@ test "test-hello_world" {
     try t_expect(std.mem.eql(u8, output.items, expected));
 }
 
+// NOTE:
+// If there is a "[" at the start of a file, it won't work since it is not larger than the furthest_matched_instruction which defaults to 0 (the lowest value)
+
 // test "test-list_all" {
 //     var file = try std.fs.cwd().openFile("bf/test-list_all.bf", .{});
 //     defer file.close();
