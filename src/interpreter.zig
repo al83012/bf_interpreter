@@ -12,9 +12,19 @@ pub const SizeConstraint = union(enum) {
     dynamic: Allocator,
 };
 
+var GPA = std.heap.GeneralPurposeAllocator(.{}){};
+const alloc = GPA.allocator();
+
 pub const InterpreterConfig = struct {
-    max_program_buffer_size: SizeConstraint,
-    reader_buf_size: usize,
+    const Self = @This();
+
+    max_program_buffer_size: SizeConstraint = .{ .dynamic = alloc },
+    reader_buf_size: usize = 4096,
+    instr_alloc: Allocator = alloc,
+    jump_alloc: Allocator = alloc,
+    channel_alloc: Allocator = alloc,
+    IoWriter: type = @TypeOf(std.io.getStdOut().writer()),
+    IoReader: type = @TypeOf(std.io.getStdIn().reader()),
 };
 
 pub const InstructionExecutionError = error{
@@ -43,6 +53,13 @@ pub const ReducedInstruction = union(enum) {
     WriteIo,
 
     const Self = @This();
+
+    pub fn isEOP(self: Self) bool {
+        return switch (self) {
+            ReducedInstruction.EOP => true,
+            else => false,
+        };
+    }
 
     pub fn deepEqual(a: ReducedInstruction, b: ReducedInstruction) bool {
         return switch (a) {
@@ -200,10 +217,11 @@ pub fn InstructionWriter(comptime file_reader_buf_size: usize) type {
             return .{
                 .channel = channel,
                 .char_reader = Self.Reader.init(file),
+                .indent_counter = 0,
             };
         }
 
-        fn genNextInstruction(self: *Self) InstructionParserError!ReducedInstruction {
+        fn genNextInstruction(self: *Self) !ReducedInstruction {
             const next_char = try self.char_reader.read() orelse if (self.indent_counter == 0) return .EOP else return InstructionParserError.UnmatchedOpenBracket;
             switch (next_char) {
                 '<' => {
@@ -290,15 +308,21 @@ pub fn InstructionWriter(comptime file_reader_buf_size: usize) type {
             while (true) {
                 const next_instruction = try self.genNextInstruction();
                 try self.channel.send(next_instruction);
-                if (next_instruction == .EOP) {
+                if (next_instruction.isEOP()) {
                     break;
                 }
             }
         }
+
+        pub fn sendAllPanic(self: *Self) void {
+            self.sendAllInstructions catch |err| {
+                std.debug.panic("Sending panicked with error {any}", err);
+            };
+        }
     };
 }
 
-pub fn InstructionReader(buffer_size: SizeConstraint) type {
+pub fn InstructionReader(buffer_size: SizeConstraint, OutWriter: type, InReader: type) type {
     return struct {
         channel: *InstructionChannel,
         local_instructions: ArrayList(ReducedInstruction),
@@ -308,26 +332,28 @@ pub fn InstructionReader(buffer_size: SizeConstraint) type {
         jump_points: HashMap(usize, usize), // Jump from bracket pos to bracket pos
         unmatched_open: ArrayList(usize),
         buffer: ArrayList(u8),
-        out: Writer,
-        in: Reader,
+        out: OutWriter,
+        in: InReader,
         furthest_matched_instruction: usize,
 
         const Self = @This();
 
-        pub fn init(channel: *InstructionChannel, instruction_alloc: Allocator, jump_alloc: Allocator) Self {
+        pub fn init(channel: *InstructionChannel, instruction_alloc: Allocator, jump_alloc: Allocator, out_writer: OutWriter, in_reader: InReader) Self {
             const local_instructions = ArrayList(ReducedInstruction).init(instruction_alloc);
             const instruction_pos = 0;
             const read_from_channel = true;
             const pointer_pos = 0;
-            const buffer = comptime switch (buffer_size) {
-                .dynamic => |a| ArrayList(usize).init(a),
+            var buffer = comptime switch (buffer_size) {
+                .dynamic => |a| ArrayList(u8).init(a),
                 .sized => |s| blk: {
                     const buffer = [_]u8{0} ** s;
-                    break :blk ArrayList(usize).init(std.heap.FixedBufferAllocator.init(buffer));
+                    break :blk ArrayList(u8).init(std.heap.FixedBufferAllocator.init(buffer));
                 },
             };
-            const std_out = std.io.getStdOut().writer();
-            const std_in = std.io.getStdIn().reader();
+
+            buffer.append(0) catch |err| {
+                std.debug.panic("Append failed: {any}", .{err});
+            };
 
             const jump_points = HashMap(usize, usize).init(jump_alloc);
             const unmatched_open = ArrayList(usize).init(jump_alloc);
@@ -341,58 +367,57 @@ pub fn InstructionReader(buffer_size: SizeConstraint) type {
                 .buffer = buffer,
                 .jump_points = jump_points,
                 .unmatched_open = unmatched_open,
-                .out = std_out,
-                .in = std_in,
-                .furthest_resolved_instruction = 0,
+                .out = out_writer,
+                .in = in_reader,
+                .furthest_matched_instruction = 0,
             };
         }
 
-        pub fn setOutWriter(self: *Self, writer: Writer) void {
-            self.out = writer;
-        }
-
-        pub fn setInReader(self: *Self, reader: Reader) void {
-            self.in = reader;
-        }
-
-        pub fn deinit(self: Self) void {
+        pub fn deinit(self: *Self) void {
             self.local_instructions.deinit();
-            self.loop_stack.deinit();
             self.buffer.deinit();
+            self.jump_points.deinit();
+            self.unmatched_open.deinit();
         }
 
         pub fn readNext(self: *Self) !ReducedInstruction {
             if (self.read_from_channel) {
                 return try self.readNextFromChannel();
             } else {
-                return try self.local_instructions.items[self.instruction_pos];
+                return self.local_instructions.items[self.instruction_pos];
             }
         }
 
         fn searchClosingBracket(self: *Self) !void {
-            var indent_counter = 1;
+            var indent_counter: usize = 1;
             self.read_from_channel = self.instruction_pos >= self.local_instructions.items.len;
 
             while (indent_counter != 0) {
-                const next_instruction = self.readNext();
-                if (next_instruction == .EOP) {
+                const next_instruction = try self.readNext();
+                if (next_instruction.isEOP()) {
                     return InstructionExecutionError.UnmatchedOpenBracket;
                 }
                 switch (next_instruction) {
                     ReducedInstruction.JumpPoint => {
                         indent_counter += 1;
-                        self.unmatched_open.append(self.instruction_pos);
+                        try self.unmatched_open.append(self.instruction_pos);
                     },
                     ReducedInstruction.JumpBackTo => {
                         indent_counter -= 1;
-                        const matching_open = self.unmatched_open.pop();
-                        self.jump_points.put(matching_open, self.instruction_pos);
-                        self.jump_points.put(self.instruction_pos, matching_open);
-                        self.furthest_matched_instruction = self.instruction_pos;
+                        _ = try self.matchOpenBracket(self.instruction_pos);
                     },
+                    else => {},
                 }
                 self.instruction_pos += 1;
             }
+        }
+
+        fn matchOpenBracket(self: *Self, close: usize) !usize {
+            const matching_open = self.unmatched_open.popOrNull() orelse return InstructionExecutionError.UnexpectedJumpBack;
+            try self.jump_points.put(matching_open, close);
+            try self.jump_points.put(close, matching_open);
+            self.furthest_matched_instruction = close;
+            return matching_open;
         }
 
         fn processInstruction(self: *Self, instruction: ReducedInstruction) !void {
@@ -402,18 +427,28 @@ pub fn InstructionReader(buffer_size: SizeConstraint) type {
                 .Zero => self.selectedValue().* = 0,
                 .JumpPoint => {
                     // We first need to determine whether this jumppoint has been resolved yet --> Does it have to be put on the unmatched stack?
-                    if (self.furthest_resolved_instruction < self.instruction_pos) {
-                        self.unmatched_open.append(self.instruction_pos);
-                        if (self.selectedValue.* == 0) {
-                            self.searchClosingBracket();
+                    if (self.furthest_matched_instruction < self.instruction_pos) {
+                        try self.unmatched_open.append(self.instruction_pos);
+                        if (self.selectedValue().* == 0) {
+                            try self.searchClosingBracket();
                         }
                     } else {
-                        if (self.selectedValue.* == 0) {
+                        if (self.selectedValue().* == 0) {
                             self.instruction_pos = self.jump_points.get(self.instruction_pos) orelse return InstructionExecutionError.FurthestMatchedInstructionCorrupted;
                         }
                     }
                 },
-                .JumpBackTo => {},
+                .JumpBackTo => {
+                    if (self.furthest_matched_instruction < self.instruction_pos) {
+                        const open = try self.matchOpenBracket(self.instruction_pos);
+                        if (self.selectedValue().* != 0) {
+                            self.instruction_pos = open;
+                        }
+                    } else {
+                        const open = self.jump_points.get(self.instruction_pos) orelse return InstructionExecutionError.FurthestMatchedInstructionCorrupted;
+                        self.instruction_pos = open;
+                    }
+                },
                 .MovLeft => |x| {
                     if (self.pointer_pos >= x) {
                         self.pointer_pos -= x;
@@ -423,13 +458,18 @@ pub fn InstructionReader(buffer_size: SizeConstraint) type {
                     self.pointer_pos += x;
                     if (self.pointer_pos >= self.buffer.items.len) {
                         const extend = self.pointer_pos - self.buffer.items.len + 1;
-                        self.buffer.appendNTimes(0, extend);
+                        try self.buffer.appendNTimes(0, extend);
                     }
                 },
                 .EOP => {},
-                .ReadIo => {},
-
-                else => @panic("Not yet implemented"),
+                .ReadIo => {
+                    const value = try self.in.readByte();
+                    self.selectedValue().* = value;
+                },
+                .WriteIo => {
+                    const selected = self.selectedValue().*;
+                    try self.out.writeByte(selected);
+                },
             }
         }
 
@@ -439,11 +479,11 @@ pub fn InstructionReader(buffer_size: SizeConstraint) type {
 
         fn processAllInstructions(self: *Self) !void {
             while (true) {
-                const next_instruction = self.readNext();
-                if (next_instruction == .EOP) {
+                const next_instruction = try self.readNext();
+                if (next_instruction.isEOP()) {
                     return;
                 }
-                self.processInstruction(next_instruction);
+                try self.processInstruction(next_instruction);
                 self.instruction_pos += 1;
                 self.read_from_channel = self.instruction_pos >= self.local_instructions.items.len;
             }
@@ -519,15 +559,62 @@ pub fn PeekableFileReader(comptime buf_size: usize, comptime max_peek_len: usize
     };
 }
 
+pub fn Interpreter(comptime config: InterpreterConfig) type {
+    return struct {
+        const InterpreterWriter = InstructionWriter(config.reader_buf_size);
+        const InterpreterReader = InstructionReader(config.max_program_buffer_size, config.IoWriter, config.IoReader);
+        const Self = @This();
+
+        writer: InterpreterWriter,
+        reader: InterpreterReader,
+        channel: InstructionChannel,
+
+        pub fn init(file: File, io_writer: config.IoWriter, io_reader: config.IoReader) Self {
+            var channel = InstructionChannel.init(config.channel_alloc);
+
+            var writer = Self.InterpreterWriter.init(file, &channel);
+            var reader = Self.InterpreterReader.init(&channel, config.instr_alloc, config.jump_alloc, io_writer, io_reader);
+
+            _ = &writer;
+            _ = &reader;
+
+            return .{
+                .writer = writer,
+                .reader = reader,
+                .channel = channel,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.channel.deinit();
+            self.reader.deinit();
+            // Writer has no deinit
+        }
+
+        pub fn run(self: *Self) !void {
+            var writer_thread = try std.Thread.spawn(.{}, InterpreterWriter.sendAllInstructions, .{&self.writer});
+            try self.reader.processAllInstructions();
+            writer_thread.join();
+        }
+    };
+}
+
 const File = std.fs.File;
 const t_expect = std.testing.expect;
 
 test "test_hello-world" {
-    const file = try std.fs.cwd().openFile("bf/test-1.bs", .{});
+    var file = try std.fs.cwd().openFile("bf/test-1.bs", .{});
     defer file.close();
 
-    var channel = InstructionChannel.init(std.testing.allocator);
-    defer channel.deinit();
+    var std_out = std.io.getStdOut().writer();
+    var std_in = std.io.getStdIn().reader();
+
+    _ = &std_out;
+    _ = &std_in;
+
+    var interpreter = Interpreter(.{}).init(file, std_out, std_in);
+    defer interpreter.deinit();
+    try interpreter.run();
 }
 
 test "test_1-InstructionGen" {

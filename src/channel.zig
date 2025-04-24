@@ -63,7 +63,7 @@ pub fn BufferedChannel(comptime T: type, comptime bufSize: usize) type {
             self.closed = true;
         }
 
-        fn capacity(self: *Self) u8 {
+        fn capacity(self: *Self) usize {
             return self.buf.len;
         }
 
@@ -76,8 +76,8 @@ pub fn BufferedChannel(comptime T: type, comptime bufSize: usize) type {
             }
         }
 
-        fn len(self: *Self) u8 {
-            var i: u8 = 0;
+        fn len(self: *Self) usize {
+            var i: usize = 0;
             for (self.buf) |item| {
                 if (item) |_| {
                     i += 1;
