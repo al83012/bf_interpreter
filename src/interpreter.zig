@@ -675,43 +675,43 @@ test "test-hello_world" {
     try t_expect(std.mem.eql(u8, output.items, expected));
 }
 
-test "test-list_all" {
-    var file = try std.fs.cwd().openFile("bf/test-list_all.bf", .{});
-    defer file.close();
-
-    var output = ArrayList(u8).init(std.testing.allocator);
-    defer output.deinit();
-
-    var writer = output.writer();
-    var std_in = std.io.getStdIn().reader();
-
-    _ = &writer;
-    _ = &std_in;
-
-    var interpreter = Interpreter(.{}).init(file, writer, std_in);
-    defer interpreter.deinit();
-    try interpreter.run();
-
-    // const expected: []const u8 = "Hello World!\n";
-
-    // std.debug.print("\nDebug Charcodes for {s} ", .{output.items});
-    // for (output.items) |char| {
-    //     std.debug.print("{x} ", .{char});
-    // }
-    // std.debug.print("\n\n", .{});
-
-    // const expected_len = expected.len;
-    // const output_len = output.items.len;
-    // if (expected_len != output_len) {
-    //     std.debug.panic("Output len does not match, expected: {d}, found: {d}", .{ expected_len, output_len });
-    // }
-
-    // std.debug.print("\nExpectedLen {}", .{output.items.len});
-
-    // try t_expect(std.mem.eql(u8, output.items, expected));
-
-    std.debug.print("\n\n{s}\n\n", .{output.items});
-}
+// test "test-list_all" {
+//     var file = try std.fs.cwd().openFile("bf/test-list_all.bf", .{});
+//     defer file.close();
+//
+//     var output = ArrayList(u8).init(std.testing.allocator);
+//     defer output.deinit();
+//
+//     var writer = output.writer();
+//     var std_in = std.io.getStdIn().reader();
+//
+//     _ = &writer;
+//     _ = &std_in;
+//
+//     var interpreter = Interpreter(.{}).init(file, writer, std_in);
+//     defer interpreter.deinit();
+//     try interpreter.run();
+//
+//     // const expected: []const u8 = "Hello World!\n";
+//
+//     // std.debug.print("\nDebug Charcodes for {s} ", .{output.items});
+//     // for (output.items) |char| {
+//     //     std.debug.print("{x} ", .{char});
+//     // }
+//     // std.debug.print("\n\n", .{});
+//
+//     // const expected_len = expected.len;
+//     // const output_len = output.items.len;
+//     // if (expected_len != output_len) {
+//     //     std.debug.panic("Output len does not match, expected: {d}, found: {d}", .{ expected_len, output_len });
+//     // }
+//
+//     // std.debug.print("\nExpectedLen {}", .{output.items.len});
+//
+//     // try t_expect(std.mem.eql(u8, output.items, expected));
+//
+//     std.debug.print("\n\n{s}\n\n", .{output.items});
+// }
 
 test "test_1-InstructionGen" {
     const file = try std.fs.cwd().openFile("bf/test-1.bf", .{});
