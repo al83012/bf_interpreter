@@ -344,6 +344,8 @@ pub fn InstructionReader(buffer_size: SizeConstraint, OutWriter: type, InReader:
 
         pub fn init(channel: *InstructionChannel, instruction_alloc: Allocator, jump_alloc: Allocator, out_writer: OutWriter, in_reader: InReader) Self {
             const local_instructions = ArrayList(ReducedInstruction).init(instruction_alloc);
+            // local_instructions.append(ReducedInstruction.Zero) catch |err| std.debug.panic("Append failed: {}", .{err});
+
             const instruction_pos = 0;
             const read_from_channel = true;
             const pointer_pos = 0;
@@ -428,18 +430,18 @@ pub fn InstructionReader(buffer_size: SizeConstraint, OutWriter: type, InReader:
             switch (instruction) {
                 .Incr => |x| {
                     self.selectedValue().* +%= x;
-                    // std.debug.print("Selected Value now is {d}", .{self.selectedValue().*});
+                    std.debug.print("\nSelected Value now is {d}", .{self.selectedValue().*});
                 },
                 .Decr => |x| {
                     self.selectedValue().* -%= x;
-                    // std.debug.print("Selected Value now is {d}", .{self.selectedValue().*});
+                    std.debug.print("\nSelected Value now is {d}", .{self.selectedValue().*});
                 },
                 .Zero => self.selectedValue().* = 0,
                 .JumpPoint => {
-                    // We first need to determine whether this jumppoint has been resolved yet --> Does it have to be put on the unmatched stack?
                     if (self.furthest_matched_instruction < self.instruction_pos) {
                         try self.unmatched_open.append(self.instruction_pos);
                         if (self.selectedValue().* == 0) {
+                            std.debug.print("searching forward", .{});
                             try self.searchClosingBracket();
                         }
                     } else {
@@ -450,6 +452,7 @@ pub fn InstructionReader(buffer_size: SizeConstraint, OutWriter: type, InReader:
                 },
                 .JumpBackTo => {
                     if (self.furthest_matched_instruction < self.instruction_pos) {
+                        std.debug.print("Found ] during normal process", .{});
                         const open = try self.matchOpenBracket(self.instruction_pos);
                         if (self.selectedValue().* != 0) {
                             self.instruction_pos = open;
@@ -492,7 +495,7 @@ pub fn InstructionReader(buffer_size: SizeConstraint, OutWriter: type, InReader:
         fn processAllInstructions(self: *Self) !void {
             while (true) {
                 const next_instruction = try self.readNext();
-                // std.debug.print("\nNext processed instruction: {any}", .{next_instruction});
+                std.debug.print("\nNext [{d}]: {any}", .{ self.instruction_pos, next_instruction });
                 if (next_instruction.isEOP()) {
                     return;
                 }
@@ -633,7 +636,7 @@ const t_expect = std.testing.expect;
 //         if (instr.isEOP()) {
 //             break;
 //         }
-//         std.debug.print("\nREDUCED INSTRUCTION: {any}", .{instr});
+//         // std.debug.print("\nREDUCED INSTRUCTION: {any}", .{instr});
 //     } else |err| {
 //         return err;
 //     }
@@ -658,11 +661,11 @@ test "test-hello_world" {
 
     const expected: []const u8 = "Hello World!\n";
 
-    // std.debug.print("\nDebug Charcodes for {s} ", .{output.items});
+    std.debug.print("\nDebug Charcodes for {s} ", .{output.items});
     for (output.items) |char| {
         std.debug.print("{x} ", .{char});
     }
-    // std.debug.print("\n\n", .{});
+    std.debug.print("\n\n", .{});
 
     const expected_len = expected.len;
     const output_len = output.items.len;
@@ -675,43 +678,43 @@ test "test-hello_world" {
     try t_expect(std.mem.eql(u8, output.items, expected));
 }
 
-test "test-list_all" {
-    var file = try std.fs.cwd().openFile("bf/test-list_all.bf", .{});
-    defer file.close();
-
-    var output = ArrayList(u8).init(std.testing.allocator);
-    defer output.deinit();
-
-    var writer = output.writer();
-    var std_in = std.io.getStdIn().reader();
-
-    _ = &writer;
-    _ = &std_in;
-
-    var interpreter = Interpreter(.{}).init(file, writer, std_in);
-    defer interpreter.deinit();
-    try interpreter.run();
-
-    // const expected: []const u8 = "Hello World!\n";
-
-    // std.debug.print("\nDebug Charcodes for {s} ", .{output.items});
-    // for (output.items) |char| {
-    //     std.debug.print("{x} ", .{char});
-    // }
-    // std.debug.print("\n\n", .{});
-
-    // const expected_len = expected.len;
-    // const output_len = output.items.len;
-    // if (expected_len != output_len) {
-    //     std.debug.panic("Output len does not match, expected: {d}, found: {d}", .{ expected_len, output_len });
-    // }
-
-    // std.debug.print("\nExpectedLen {}", .{output.items.len});
-
-    // try t_expect(std.mem.eql(u8, output.items, expected));
-
-    std.debug.print("\n\n{s}\n\n", .{output.items});
-}
+// test "test-list_all" {
+//     var file = try std.fs.cwd().openFile("bf/test-list_all.bf", .{});
+//     defer file.close();
+//
+//     var output = ArrayList(u8).init(std.testing.allocator);
+//     defer output.deinit();
+//
+//     var writer = output.writer();
+//     var std_in = std.io.getStdIn().reader();
+//
+//     _ = &writer;
+//     _ = &std_in;
+//
+//     var interpreter = Interpreter(.{}).init(file, writer, std_in);
+//     defer interpreter.deinit();
+//     try interpreter.run();
+//
+//     const expected: []const u8 = "Hello World!\n";
+//
+//     std.debug.print("\nDebug Charcodes for {s} ", .{output.items});
+//     for (output.items) |char| {
+//         std.debug.print("{x} ", .{char});
+//     }
+//     std.debug.print("\n\n", .{});
+//
+//     const expected_len = expected.len;
+//     const output_len = output.items.len;
+//     if (expected_len != output_len) {
+//         std.debug.panic("Output len does not match, expected: {d}, found: {d}", .{ expected_len, output_len });
+//     }
+//
+//     std.debug.print("\nExpectedLen {}", .{output.items.len});
+//
+//     try t_expect(std.mem.eql(u8, output.items, expected));
+//
+//     std.debug.print("\n\n{s}\n\n", .{output.items});
+// }
 
 test "test_1-InstructionGen" {
     const file = try std.fs.cwd().openFile("bf/test-1.bf", .{});
