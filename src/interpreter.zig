@@ -316,6 +316,7 @@ pub fn InstructionWriter(comptime file_reader_buf_size: usize) type {
                     break;
                 }
             }
+            std.debug.print("\nWriter thread finished\n", .{});
         }
 
         pub fn sendAllPanic(self: *Self) void {
@@ -389,16 +390,16 @@ pub fn InstructionReader(buffer_size: SizeConstraint, OutWriter: type, InReader:
         pub fn readNext(self: *Self) !ReducedInstruction {
             self.read_from_channel = self.instruction_pos >= self.local_instructions.items.len;
             if (self.read_from_channel) {
-                std.debug.print("\nReading from channel; Last pos: {d}", .{self.instruction_pos});
+                // std.debug.print("\nReading from channel; Last pos: {d}", .{self.instruction_pos});
                 return try self.readNextFromChannel();
             } else {
-                std.debug.print("\nReading from local; Last pos: {d}", .{self.instruction_pos});
+                // std.debug.print("\nReading from local; Last pos: {d}", .{self.instruction_pos});
                 return self.local_instructions.items[self.instruction_pos];
             }
         }
 
         fn searchClosingBracket(self: *Self) !void {
-            std.debug.print("\nStart searching for closing bracket", .{});
+            // std.debug.print("\nStart searching for closing bracket", .{});
             var indent_counter: usize = 1;
             self.instruction_pos += 1;
 
@@ -434,11 +435,11 @@ pub fn InstructionReader(buffer_size: SizeConstraint, OutWriter: type, InReader:
             switch (instruction) {
                 .Incr => |x| {
                     self.selectedValue().* +%= x;
-                    std.debug.print("Selected Value now is {d}", .{self.selectedValue().*});
+                    // std.debug.print("Selected Value now is {d}", .{self.selectedValue().*});
                 },
                 .Decr => |x| {
                     self.selectedValue().* -%= x;
-                    std.debug.print("Selected Value now is {d}", .{self.selectedValue().*});
+                    // std.debug.print("Selected Value now is {d}", .{self.selectedValue().*});
                 },
                 .Zero => self.selectedValue().* = 0,
                 .JumpPoint => {
@@ -498,7 +499,7 @@ pub fn InstructionReader(buffer_size: SizeConstraint, OutWriter: type, InReader:
         fn processAllInstructions(self: *Self) !void {
             while (true) {
                 const next_instruction = try self.readNext();
-                std.debug.print("\nNext processed instruction: {any}", .{next_instruction});
+                // std.debug.print("\nNext processed instruction: {any}", .{next_instruction});
                 if (next_instruction.isEOP()) {
                     return;
                 }
@@ -613,7 +614,9 @@ pub fn Interpreter(comptime config: InterpreterConfig) type {
         pub fn run(self: *Self) !void {
             var writer_thread = try std.Thread.spawn(.{}, InterpreterWriter.sendAllInstructions, .{&self.writer});
             try self.reader.processAllInstructions();
+            std.debug.print("\nReader thread finished\n", .{});
             writer_thread.join();
+            std.debug.print("\nThreads joined\n", .{});
         }
     };
 }
@@ -664,19 +667,19 @@ test "test-hello_world" {
 
     const expected: []const u8 = "Hello World!\n";
 
-    std.debug.print("\nDebug Charcodes for {s} ", .{output.items});
-    for (output.items) |char| {
-        std.debug.print("{x} ", .{char});
-    }
-    std.debug.print("\n\n", .{});
-
-    const expected_len = expected.len;
-    const output_len = output.items.len;
-    if (expected_len != output_len) {
-        std.debug.panic("Output len does not match, expected: {d}, found: {d}", .{ expected_len, output_len });
-    }
-
-    std.debug.print("\nExpectedLen {}", .{output.items.len});
+    // std.debug.print("\nDebug Charcodes for {s} ", .{output.items});
+    // for (output.items) |char| {
+    //     std.debug.print("{x} ", .{char});
+    // }
+    // std.debug.print("\n\n", .{});
+    //
+    // const expected_len = expected.len;
+    // const output_len = output.items.len;
+    // if (expected_len != output_len) {
+    //     std.debug.panic("Output len does not match, expected: {d}, found: {d}", .{ expected_len, output_len });
+    // }
+    //
+    // std.debug.print("\nExpectedLen {}", .{output.items.len});
 
     try t_expect(std.mem.eql(u8, output.items, expected));
 }
@@ -719,7 +722,7 @@ test "test-list_all" {
 
     // try t_expect(std.mem.eql(u8, output.items, expected));
 
-    std.debug.print("\n\n{s}\n\n", .{output.items});
+    // std.debug.print("\n\n{s}\n\n", .{output.items});
 }
 
 test "test_1-InstructionGen" {
@@ -736,4 +739,22 @@ test "test_1-InstructionGen" {
     try t_expect(ReducedInstruction.deepEqual(ReducedInstruction.Zero, try instr_writer.genNextInstruction()));
     try t_expect(ReducedInstruction.deepEqual(ReducedInstruction{ .Incr = 3 }, try instr_writer.genNextInstruction()));
     try t_expect(ReducedInstruction.deepEqual(ReducedInstruction.JumpBackTo, try instr_writer.genNextInstruction()));
+}
+
+test "test-long_loop" {
+    var file = try std.fs.cwd().openFile("bf/test-long_loop.bf", .{});
+    defer file.close();
+
+    var output = ArrayList(u8).init(std.testing.allocator);
+    defer output.deinit();
+
+    var writer = output.writer();
+    var std_in = std.io.getStdIn().reader();
+
+    _ = &writer;
+    _ = &std_in;
+
+    var interpreter = Interpreter(.{}).init(file, writer, std_in);
+    defer interpreter.deinit();
+    try interpreter.run();
 }
