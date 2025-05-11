@@ -3,7 +3,10 @@ A very simple BrainFuck-Interpreter written in Zig.
 
 Uses a channel to communicate between two parts of the program:
 
-The file-reader reduces bf-instructions into an instruction-set that combines common patterns. E.g. +++ will get converted to Incr(3), which makes it very simple to execute.
+The file-reader reduces bf-instructions into an instruction-set that combines common patterns. E.g.
+`+++` -> `Incr(3)`
+`<<<<` -> `MovLeft(4)`
+`[+]` -> `Zero`
 
 The instruction-reader reads messages from the channel when seeing parts of the program for the first time but then stores them locally (so that loops for instance don't have to rely on the channel).
 
